@@ -191,6 +191,13 @@ func (kt *KustTarget) addHashesToNames(
 // and `origin.ref` accordingly.
 func (kt *KustTarget) AccumulateTarget() (
 	ra *accumulator.ResAccumulator, err error) {
+	cleanupFunction := load.EnableReusableGitClones()
+	defer func() {
+		cleanupError := cleanupFunction()
+		if err == nil {
+			err = cleanupError
+		}
+	}()
 	return kt.accumulateTarget(accumulator.MakeEmptyAccumulator())
 }
 

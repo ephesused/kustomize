@@ -46,8 +46,8 @@ func ClonerUsingGitExec(repoSpec *RepoSpec) error {
 
 // DoNothingCloner returns a cloner that only sets
 // cloneDir field in the repoSpec.  It's assumed that
-// the cloneDir is associated with some fake filesystem
-// used in a test.
+// the cloneDir is associated with existing file system
+// content.
 func DoNothingCloner(dir filesys.ConfirmedDir) Cloner {
 	return func(rs *RepoSpec) error {
 		rs.Dir = dir

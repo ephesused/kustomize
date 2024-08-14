@@ -181,11 +181,100 @@ func (fl *FileLoader) New(path string) (ifc.Loader, error) {
 		fl.loadRestrictor, root, fl.fSys, fl, fl.cloner), nil
 }
 
+// enableReusableGitClones indicates if git clones may be re-used.
+var enableReusableGitClones = false
+
+// EnableReusableGitClones enables re-use of git clones. It returns
+// a defer function.
+func EnableReusableGitClones() func() error {
+	if enableReusableGitClones {
+		return func() error {
+			return nil
+		}
+	}
+	enableReusableGitClones = true
+	return func() error {
+		enableReusableGitClones = false
+		return runDeferredCleaners()
+	}
+}
+
+// resulableGitCloners is a map from a repospec to a cloner that
+// can be re-used.
+var reusableGitCloners = map[*git.RepoSpec]git.Cloner{}
+
+// addReusableGitCloner adds a cloner to the reusableGitCloners map.
+func addReusableGitCloner(repoSpec *git.RepoSpec, gitCloner git.Cloner) {
+	reusableGitCloners[repoSpec] = gitCloner
+}
+
+// isGitRepoSpecUsableFor returns true if cachedRepoSpec represents
+// a git clone that can be used for repoSpec.
+func isGitRepoSpecUsableFor(cachedRepoSpec, repoSpec *git.RepoSpec) bool {
+	if cachedRepoSpec.Host != repoSpec.Host {
+		return false
+	}
+	if cachedRepoSpec.Ref != repoSpec.Ref {
+		return false
+	}
+	if cachedRepoSpec.RepoPath != repoSpec.RepoPath {
+		return false
+	}
+	if cachedRepoSpec.Submodules == false && repoSpec.Submodules == true {
+		return false
+	}
+	return true
+}
+
+// getReusableGitCloner returns a reusable cloner that can be used for
+// repoSpec. Nil is returned if no reusable cloner is found.
+func getReusableGitCloner(repoSpec *git.RepoSpec) git.Cloner {
+	for cachedRepoSpec, _ := range reusableGitCloners {
+		if isGitRepoSpecUsableFor(cachedRepoSpec, repoSpec) {
+			return git.DoNothingCloner(cachedRepoSpec.Dir)
+		}
+	}
+	return nil
+}
+
+// deferredCleaners are cleaners that should be called when all accumulations
+// have completed. This deferral enables re-using git clones.
+var deferredCleaners = []func() error{}
+
+// addDeferredCleaner adds the given function to the deferred cleaner list.
+func addDeferredCleaner(f func() error) {
+	deferredCleaners = append(deferredCleaners, f)
+}
+
+// runDeferredCleaners executes the deferred cleaners in opposite order
+// of insertion, and resets the deferred cleaner list to empty and the
+// reusable git cloner map to empty.
+func runDeferredCleaners() error {
+	defer func() {
+		reusableGitCloners = map[*git.RepoSpec]git.Cloner{}
+		deferredCleaners = []func() error{}
+	}()
+	for i := len(deferredCleaners) - 1; i >= 0; i-- {
+		f := deferredCleaners[i]
+		if err := f(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // newLoaderAtGitClone returns a new Loader pinned to a temporary
 // directory holding a cloned git repo.
 func newLoaderAtGitClone(
 	repoSpec *git.RepoSpec, fSys filesys.FileSystem,
 	referrer *FileLoader, cloner git.Cloner) (ifc.Loader, error) {
+	var reusableGitCloner git.Cloner = nil
+	if enableReusableGitClones {
+		reusableGitCloner = getReusableGitCloner(repoSpec)
+		if reusableGitCloner != nil {
+			cloner = reusableGitCloner
+		}
+	}
 	cleaner := repoSpec.Cleaner(fSys)
 	err := cloner(repoSpec)
 	if err != nil {
@@ -214,7 +303,7 @@ func newLoaderAtGitClone(
 		return nil, fmt.Errorf("%q refers to directory outside of repo %q", repoSpec.AbsPath(),
 			repoSpec.CloneDir())
 	}
-	return &FileLoader{
+	fileLoader := &FileLoader{
 		// Clones never allowed to escape root.
 		loadRestrictor: RestrictionRootOnly,
 		root:           root,
@@ -223,7 +312,15 @@ func newLoaderAtGitClone(
 		fSys:           fSys,
 		cloner:         cloner,
 		cleaner:        cleaner,
-	}, nil
+	}
+	if enableReusableGitClones {
+		fileLoader.cleaner = func() error { return nil }
+		if reusableGitCloner == nil {
+			addReusableGitCloner(repoSpec, cloner)
+			addDeferredCleaner(cleaner)
+		}
+	}
+	return fileLoader, nil
 }
 
 func (fl *FileLoader) errIfGitContainmentViolation(
